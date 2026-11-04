@@ -1,5 +1,28 @@
 package app.letnievpn.ui
 
+import android.app.Activity
+import android.content.ContextWrapper
+import android.graphics.Bitmap
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.view.PixelCopy
+import android.view.View
+import androidx.core.view.drawToBitmap
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.ClipOp
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.TextUnit
+import kotlin.math.hypot
 import android.content.ClipboardManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.CubicBezierEasing
@@ -40,7 +63,6 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.statusBarsIgnoringVisibility
 import androidx.compose.foundation.layout.navigationBarsIgnoringVisibility
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.runtime.mutableStateListOf
@@ -53,7 +75,6 @@ import androidx.compose.ui.zIndex
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -82,7 +103,6 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.produceState
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -103,6 +123,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
@@ -131,7 +152,7 @@ fun MainScreen(onPower: () -> Unit, onReconnect: () -> Unit, onPickAvatar: (Stri
     // размер шрифта не раздуваем системным масштабом — иначе блоки выходят громоздкими
     val d = LocalDensity.current
     CompositionLocalProvider(LocalDensity provides Density(d.density, fontScale = minOf(d.fontScale, 1f))) {
-        LetnieTheme { LookHost(onPower, onReconnect, onPickAvatar) }
+        LetnieTheme { Content(onPower, onReconnect, onPickAvatar) }
     }
 }
 
@@ -158,145 +179,9 @@ private fun Modifier.glass(
         shape
     )
 
-@OptIn(ExperimentalLayoutApi::class)
-/** Кнопка включения: стекло (объём), плоская заливка или кольцо — по выбору в «Оформлении». */
-private fun Modifier.btnSurface(p: Palette, a: Color, b: Color, shadow: Color, flat: Color): Modifier = when (p.btn) {
-    1 -> this.background(flat, CircleShape)
-    2 -> this.border(3.dp, p.primary, CircleShape)
-    else -> this.glass(p, CircleShape, a, b, 14.dp, shadow, flat)
-}
-
-/**
- * Экран приложения и «Оформление» в одном: приложение уменьшается в карточку, по бокам такие же карточки
- * остальных тем. Листаем пальцем или нажимаем на карточку; внизу — тема, акцент и вид кнопки.
- * «Применить» сохраняет, «Отмена» возвращает всё как было. Карточки-превью — это то же самое приложение,
- * только в другой палитре и без нажатий.
- */
-@Composable
-private fun LookHost(onPower: () -> Unit, onReconnect: () -> Unit, onPickAvatar: (String) -> Unit) {
-    val p = LocalPalette.current
-    val accent by Repo.accent.collectAsState()
-    val btn by Repo.btnStyle.collectAsState()
-    val scope = rememberCoroutineScope()
-    val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-    val nav = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-
-    var look by remember { mutableStateOf(false) }
-    var sel by remember { mutableIntStateOf(p.kind) }
-    var dAccent by remember { mutableIntStateOf(accent) }
-    var dBtn by remember { mutableIntStateOf(btn) }
-    var tab by remember { mutableIntStateOf(0) }
-    val ap = remember { Animatable(0f) }
-    val selPos = remember { Animatable(p.kind.toFloat()) }
-    val ease = remember { CubicBezierEasing(0.16f, 1f, 0.3f, 1f) }
-    // пока идёт анимация или экран открыт, рисуем все три карточки
-    val showAll by remember { derivedStateOf { look || ap.value > 0.001f } }
-
-    LaunchedEffect(look) { ap.animateTo(if (look) 1f else 0f, tween(650, easing = ease)) }
-    LaunchedEffect(sel) { selPos.animateTo(sel.toFloat(), tween(450, easing = ease)) }
-
-    fun open() {
-        sel = p.kind
-        dAccent = accent
-        dBtn = btn
-        tab = 0
-        scope.launch { selPos.snapTo(p.kind.toFloat()) }
-        look = true
-    }
-
-    fun close(apply: Boolean) {
-        if (apply) {
-            Repo.setLook(if (sel == p.kind) Repo.themeMode.value else sel, dAccent, dBtn)
-        } else {
-            dAccent = accent
-            dBtn = btn
-            sel = p.kind
-        }
-        look = false
-    }
-
-    BackHandler(look) { close(false) }
-
-    Box(Modifier.fillMaxSize().drawBehind { drawRect(lerp(p.bg, p.back, ap.value)) }) {
-        // текущая тема рисуется последней, поверх остальных, как настоящий экран
-        val order = (0..2).filter { it != p.kind } + p.kind
-        order.forEach { i ->
-            if (i == p.kind || showAll) key(i) {
-                val pp = remember(i, dAccent, dBtn) { paletteOf(i, dAccent, dBtn) }
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .graphicsLayer {
-                            val k = ap.value
-                            val w = size.width
-                            val h = size.height
-                            val s = 1f - 0.4f * k
-                            transformOrigin = TransformOrigin(0f, 0f)
-                            scaleX = s
-                            scaleY = s
-                            translationX = k * (w * 0.2f + (i - selPos.value) * w * 0.6454f)
-                            translationY = k * maxOf(h * 0.135f, (top + 64.dp).toPx())
-                            val want = if (i == sel) 1f else 0.7f
-                            alpha = (if (i == p.kind) 1f else k) * (1f + (want - 1f) * k)
-                            shape = RoundedCornerShape((57f * k).dp)
-                            clip = true
-                        }
-                ) {
-                    CompositionLocalProvider(LocalPalette provides pp) {
-                        Content(onPower, onReconnect, onPickAvatar, i == p.kind) { open() }
-                    }
-                }
-            }
-        }
-
-        if (showAll) {
-            val cp = remember(p.kind, dAccent, dBtn) { paletteOf(p.kind, dAccent, dBtn) }
-            CompositionLocalProvider(LocalPalette provides cp) {
-                LookChrome(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer { alpha = ap.value }
-                        // нажатие по карточке выбирает её (пока экран закрывается — нажатия просто гасятся)
-                        .pointerInput(Unit) {
-                            detectTapGestures { o ->
-                                if (!look) return@detectTapGestures
-                                val w = size.width.toFloat()
-                                val ct = maxOf(size.height * 0.135f, (top + 64.dp).toPx())
-                                if (o.y in ct..(ct + 0.6f * size.height)) {
-                                    for (i in 0..2) {
-                                        val left = w * 0.2f + (i - selPos.value) * w * 0.6454f
-                                        if (o.x in left..(left + 0.6f * w)) sel = i
-                                    }
-                                }
-                            }
-                        }
-                        // листание пальцем
-                        .pointerInput(Unit) {
-                            var acc = 0f
-                            detectHorizontalDragGestures(
-                                onDragStart = { acc = 0f },
-                                onDragEnd = {
-                                    if (look && abs(acc) > 40.dp.toPx()) sel = (sel + if (acc < 0) 1 else -1).coerceIn(0, 2)
-                                },
-                            ) { _, dx -> acc += dx }
-                        },
-                    top = top,
-                    nav = nav,
-                    sel = sel,
-                    tab = tab,
-                    accent = dAccent,
-                    btn = dBtn,
-                    onCancel = { if (look) close(false) },
-                    onApply = { if (look) close(true) },
-                    onTab = { tab = it },
-                    onSel = { sel = it },
-                    onAccent = { dAccent = it },
-                    onBtn = { dBtn = it },
-                )
-            }
-        }
-    }
-}
+/** Кнопка включения: стеклянный круг. */
+private fun Modifier.btnSurface(p: Palette, a: Color, b: Color, shadow: Color, flat: Color): Modifier =
+    this.glass(p, CircleShape, a, b, 14.dp, shadow, flat)
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -304,8 +189,6 @@ private fun Content(
     onPower: () -> Unit,
     onReconnect: () -> Unit,
     onPickAvatar: (String) -> Unit,
-    interactive: Boolean,
-    onLook: () -> Unit,
 ) {
     val p = LocalPalette.current
     val ctx = LocalContext.current
@@ -313,6 +196,7 @@ private fun Content(
     val subs by Repo.subs.collectAsState()
     val smart by Repo.smart.collectAsState()
     val selected by Repo.selected.collectAsState()
+    val pings by Repo.pings.collectAsState()
     val status by Repo.vpn.collectAsState()
     val vpnServer by Repo.vpnServer.collectAsState()
     val connError by Repo.connError.collectAsState()
@@ -331,36 +215,26 @@ private fun Content(
     val bottom = keep[1].dp
 
     // Читаем состояния, чтобы экран перерисовывался при их смене
-    @Suppress("UNUSED_VARIABLE") val touch = listOf(smart, selected, subs)
+    @Suppress("UNUSED_VARIABLE") val touch = listOf(smart, selected, pings, subs)
     val best = Repo.best()
     val current = Repo.current()
     val shown: Server? = if (status == VpnStatus.OFF) current
     else subs.flatMap { it.servers }.firstOrNull { it.id == vpnServer } ?: current
 
     val scroll = rememberScrollState()
+    val scope = rememberCoroutineScope()
+    val view = LocalView.current
+    // смена темы «волной» из кнопки: снимок старого экрана поверх, в нём растёт (или сжимается) круг
+    var reveal by remember { mutableStateOf<Reveal?>(null) }
+    val revealT = remember { Animatable(0f) }
+    var themeBtn by remember { mutableStateOf(Offset.Zero) }
     // 0 — меню закрыто, 1 — меню из трёх точек, 2 — окно исключений
     var menuMode by remember { mutableStateOf(0) }
-    // пока листаем список — пинги не публикуем: прокрутка идёт без рекомпозиций
-    LaunchedEffect(scroll) {
-        snapshotFlow { scroll.isScrollInProgress }.collect { s ->
-            Repo.holdPingsScroll = s
-            if (!s) Repo.flushPings()
-        }
-    }
-    // мягкая смена темы (рампа ~900 px от кнопки)
-    val scope = rememberCoroutineScope()
-    val reveal = remember { ThemeReveal() }
-    val rootPos = remember { arrayOf(Offset.Zero) }
-    val themeBtn = remember { arrayOf(Offset.Zero) }
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(p.bg)
-            .onGloballyPositioned { rootPos[0] = it.positionInRoot() }
-    ) {
+    Box(Modifier.fillMaxSize().background(p.bg)) {
         Column(
             Modifier
                 .fillMaxSize()
+                .topFade(top + 96.dp) { scroll.value / 90f }
                 .verticalScroll(scroll)
                 .padding(top = top + 56.dp, bottom = bottom + 28.dp, start = 12.dp, end = 12.dp)
         ) {
@@ -375,31 +249,11 @@ private fun Content(
                 onReconnect()
             }
             Spacer(Modifier.height(10.dp))
-            SubsCard(subs, best, shown, if (status != VpnStatus.OFF) shown?.id else null, scroll, top, bottom, onPickAvatar) { id ->
+            SubsCard(subs, best, shown, pings, if (status != VpnStatus.OFF) shown?.id else null, scroll, top, bottom, onPickAvatar) { id ->
                 Repo.select(id)
                 onReconnect()
             }
         }
-
-        // растворение шапки при прокрутке: проявляется постепенно вместе со скроллом,
-        // а сам градиент плавный (кривая ease), без резкой границы
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(top + 96.dp)
-                .graphicsLayer { alpha = (scroll.value / 90f).coerceIn(0f, 1f) }
-                .background(
-                    Brush.verticalGradient(
-                        0.00f to p.bg,
-                        0.40f to p.bg,
-                        0.52f to p.bg.copy(alpha = 0.90f),
-                        0.64f to p.bg.copy(alpha = 0.65f),
-                        0.76f to p.bg.copy(alpha = 0.38f),
-                        0.88f to p.bg.copy(alpha = 0.14f),
-                        1.00f to p.bg.copy(alpha = 0f),
-                    )
-                )
-        )
 
         // шапка: слева смена темы, логотип и заголовок по центру, справа три точки с меню
         Box(
@@ -429,23 +283,26 @@ private fun Content(
                     .align(Alignment.CenterStart)
                     .padding(start = 4.dp)
                     .size(48.dp)
-                    .onGloballyPositioned {
-                        themeBtn[0] = it.positionInRoot() + Offset(it.size.width / 2f, it.size.height / 2f)
-                    }
+                    .onGloballyPositioned { themeBtn = it.positionInWindow() + Offset(it.size.width / 2f, it.size.height / 2f) }
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null
                     ) {
-                        // мягкая смена темы: новая тема подложена сразу, поверх — рампа старого фона от кнопки
-                        if (!reveal.active) {
-                            reveal.fromBg = p.bg
-                            reveal.origin = themeBtn[0] - rootPos[0]
-                            reveal.active = true
-                            Repo.setThemeDark(!p.dark)
-                            scope.launch {
-                                reveal.progress.animateTo(1f, tween(950, easing = FastOutSlowInEasing))
-                                reveal.active = false
-                                reveal.progress.snapTo(0f)
+                        if (reveal == null) {
+                            val toDark = !p.dark
+                            val from = themeBtn
+                            captureWindow(view) { bmp ->
+                                if (bmp == null) {
+                                    Repo.setThemeDark(toDark)
+                                } else {
+                                    reveal = Reveal(bmp.asImageBitmap(), from, toDark)
+                                    Repo.setThemeDark(toDark)
+                                    scope.launch {
+                                        revealT.snapTo(0f)
+                                        revealT.animateTo(1f, tween(720, easing = FastOutSlowInEasing))
+                                        reveal = null
+                                    }
+                                }
                             }
                         }
                     },
@@ -476,58 +333,90 @@ private fun Content(
             }
         }
 
-        // у карточек-превью на экране «Оформление» меню не нужно
-        if (interactive) BoxScopeHeaderMenu(menuMode, { menuMode = it }, onLook) {
+        BoxScopeHeaderMenu(menuMode, { menuMode = it }) {
             // «Добавить подписку»: молча берём из буфера обмена, без сообщений и всплывашек
             val text = readClipboard(ctx)
             if (text.isNotBlank()) Repo.scope.launch { Repo.addFromText(text) }
         }
 
-        // «шторка» старой темы поверх всего, пока идёт переход
-        ThemeRevealOverlay(reveal)
+        // снимок старой темы поверх всего: в тёмную — из кнопки растёт «дыра» с новой темой,
+        // в светлую — старая тёмная тема сжимается обратно в кнопку
+        reveal?.let { r ->
+            Canvas(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) { detectTapGestures { } } // пока идёт анимация, нажатия не проходят
+            ) {
+                val maxR = maxOf(
+                    hypot(r.center.x, r.center.y),
+                    hypot(size.width - r.center.x, r.center.y),
+                    hypot(r.center.x, size.height - r.center.y),
+                    hypot(size.width - r.center.x, size.height - r.center.y),
+                )
+                val k = revealT.value
+                val radius = if (r.toDark) maxR * k else maxR * (1f - k)
+                // мягкий край из прототипа: 900 px на ширине 360 px = 2,5 ширины экрана.
+                // Снимок старой темы живёт на слое, край срезан радиальной маской с
+                // smootherstep-альфой (нулевые производные на краях) — ступеньки не видно.
+                val feather = size.width * 2.5f
+                val inner = maxOf(0f, radius - feather)
+                val from = if (radius > 0.5f) inner / radius else 0f
+                val stops = (0..32).map { i ->
+                    val u = i / 32f
+                    val a = u * u * u * (u * (u * 6 - 15) + 10)
+                    val alpha = if (r.toDark) a else 1f - a
+                    Color.Black.copy(alpha = alpha) to (from + (1f - from) * u)
+                }
+                drawIntoCanvas { c ->
+                    val layer = c.saveLayer(null, Paint())
+                    c.drawImageRect(
+                        r.shot,
+                        dstOffset = IntOffset.Zero,
+                        dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()),
+                        paint = Paint()
+                    )
+                    c.drawRect(
+                        brush = Brush.radialGradient(
+                            stops.toTypedArray(),
+                            center = r.center,
+                            radius = radius.coerceAtLeast(1f)
+                        ),
+                        topLeft = Offset.Zero,
+                        size = size,
+                        blendMode = BlendMode.DstIn
+                    )
+                    c.restoreToCount(layer)
+                }
+            }
+        }
     }
 }
 
-/** Мягкая смена темы: новая тема уже подложена, поверх — рампа старого фона от кнопки, ~950 мс. */
-private class ThemeReveal {
-    val progress = Animatable(0f)
-    var active by mutableStateOf(false)
-    var origin by mutableStateOf(Offset.Zero)
-    var fromBg by mutableStateOf(Color.Transparent)
+private class Reveal(val shot: ImageBitmap, val center: Offset, val toDark: Boolean)
+
+private fun Context.findActivity(): Activity? {
+    var c: Context? = this
+    while (c is ContextWrapper && c !is Activity) c = c.baseContext
+    return c as? Activity
 }
 
-/** smootherstep: нулевые производные на краях — у мягкого края нет видимой «ступеньки». */
-private fun smootherstep(u: Float): Float = u * u * u * (u * (u * 6f - 15f) + 10f)
-
-@Composable
-private fun ThemeRevealOverlay(reveal: ThemeReveal) {
-    if (!reveal.active) return
-    Box(
-        Modifier
-            .fillMaxSize()
-            .drawBehind {
-                val p = reveal.progress.value
-                if (p > 0.995f) return@drawBehind
-                val maxR = listOf(
-                    kotlin.math.hypot(reveal.origin.x, reveal.origin.y),
-                    kotlin.math.hypot(size.width - reveal.origin.x, reveal.origin.y),
-                    kotlin.math.hypot(reveal.origin.x, size.height - reveal.origin.y),
-                    kotlin.math.hypot(size.width - reveal.origin.x, size.height - reveal.origin.y)
-                ).max()
-                // рампа ~900 px: 33 сэмпла smootherstep по радиусу — край получается мягким
-                val r = maxR * p
-                drawRect(
-                    Brush.radialGradient(
-                        colorStops = Array(33) { i ->
-                            val u = i / 32f
-                            u to reveal.fromBg.copy(alpha = smootherstep(u))
-                        },
-                        center = reveal.origin,
-                        radius = r
-                    )
-                )
-            }
-    )
+/** Снимок окна приложения (PixelCopy, на старых Android — через draw). null — снять не вышло. */
+private fun captureWindow(view: View, done: (Bitmap?) -> Unit) {
+    val win = view.context.findActivity()?.window
+    val root = win?.decorView
+    if (win == null || root == null || root.width <= 0 || root.height <= 0) { done(null); return }
+    try {
+        if (Build.VERSION.SDK_INT >= 26) {
+            val bmp = Bitmap.createBitmap(root.width, root.height, Bitmap.Config.ARGB_8888)
+            PixelCopy.request(win, bmp, { res ->
+                if (res == PixelCopy.SUCCESS) done(bmp) else { bmp.recycle(); done(null) }
+            }, Handler(Looper.getMainLooper()))
+        } else {
+            done(root.drawToBitmap())
+        }
+    } catch (e: Throwable) {
+        done(null)
+    }
 }
 
 private fun readClipboard(ctx: Context): String = try {
@@ -549,8 +438,9 @@ private fun PowerBlock(
     connError: String,
     onPower: () -> Unit,
 ) {
-    // вся карта нужна только здесь: перерисовывается один блок, а не весь экран
-    val pings by Repo.pings.collectAsState()
+    // пинг текущего сервера читаем из его собственного потока: шапка не реагирует
+    // на пакеты замеров всей сотни серверов
+    val shownPing = if (shown != null) Repo.pingFlow(shown.id).collectAsState().value else null
     val p = LocalPalette.current
     val on = status == VpnStatus.ON
     val active = status != VpnStatus.OFF
@@ -588,7 +478,7 @@ private fun PowerBlock(
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                PowerIcon(if (p.btn == 2) p.primary else iconColor, 50.dp)
+                PowerIcon(iconColor, 50.dp)
             }
             // кольцо загрузки: плавно появляется вокруг кнопки и исчезает после подключения
             if (ringAlpha > 0.01f) Ring(p.primary, ringAlpha)
@@ -610,14 +500,26 @@ private fun PowerBlock(
             status == VpnStatus.OFF && connError.isNotBlank() -> "Не подключилось: $connError"
             shown == null -> stringResource(R.string.hint_tap)
             status == VpnStatus.OFF && smart -> stringResource(R.string.smart_prefix, shown.name)
-            status == VpnStatus.ON -> {
-                // реальная задержка через туннель, пока она замерена; иначе пинг до сервера
-                val ms = tunnelMs.takeIf { it > 0 } ?: pings[shown.id]
-                if (ms != null && ms > 0) "${shown.name} · $ms мс" else shown.name
-            }
             else -> shown.name
         }
-        Text(
+        // реальная задержка через туннель, пока она замерена; иначе пинг до сервера
+        val liveMs = if (status == VpnStatus.ON && shown != null)
+            (tunnelMs.takeIf { it > 0 } ?: shownPing?.takeIf { it > 0 }) else null
+        if (liveMs != null && liveMs > 0 && shown != null) {
+            Row(
+                Modifier.padding(top = 2.dp, start = 24.dp, end = 24.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    shown.name + " · ",
+                    color = p.text2, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                RollingNumber(liveMs, p.text2, 13.sp, FontWeight.Normal)
+                Text(" мс", color = p.text2, fontSize = 13.sp, maxLines = 1)
+            }
+        } else Text(
             sub,
             color = if (status == VpnStatus.OFF && connError.isNotBlank()) p.primary else p.text2,
             fontSize = 13.sp,
@@ -736,6 +638,7 @@ private fun SubsCard(
     subs: List<Sub>,
     best: Server?,
     current: Server?,
+    pings: Map<String, Int>,
     /** Сервер, к которому сейчас подключены: остаётся в списке, даже если пинг не прошёл. */
     keepId: String?,
     scroll: ScrollState,
@@ -745,7 +648,7 @@ private fun SubsCard(
     onPick: (String) -> Unit,
 ) {
     val p = LocalPalette.current
-    val shut = remember { mutableStateMapOf<String, Boolean>() }
+    val opened by Repo.opened.collectAsState()
     val res = LocalContext.current.resources
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
@@ -769,6 +672,8 @@ private fun SubsCard(
     var dragDy by remember { mutableStateOf(0f) }
     // >= 0 — подписка отпущена и доезжает до этой позиции
     var lockTo by remember { mutableStateOf(-1) }
+    // момент последнего долгого нажатия/перетаскивания: отпускание пальца после него не должно раскрывать подписку
+    val dragStamp = remember { longArrayOf(0L) }
 
     // куда сейчас встала бы поднятая подписка: сравниваем её середину с серединами соседей
     fun calcTarget(): Int {
@@ -897,8 +802,8 @@ private fun SubsCard(
                 val lifted = dragId == id
                 val lift by animateFloatAsState(if (lifted) 1.02f else 1f, tween(160), label = "lift")
                 // недоступные серверы (пинг не прошёл) скрываются сами и возвращаются, когда снова отвечают
-                val shownCount = sub.servers.count { cellPing(it.id) != -1 || it.id == keepId }
-                val closed = shut[sub.id] == true
+                val shownCount = sub.servers.count { pings[it.id] != -1 || it.id == keepId }
+                val closed = sub.id !in opened
                 // состояние читаем только в graphicsLayer: во время анимации экран не перекомпонуется
                 val rot = animateFloatAsState(if (closed) -90f else 0f, tween(320, easing = FastOutSlowInEasing), label = "chev")
                 Column(
@@ -909,6 +814,7 @@ private fun SubsCard(
                             detectDragGesturesAfterLongPress(
                                 onDragStart = { start ->
                                     if (dragId == null) {
+                                        dragStamp[0] = SystemClock.uptimeMillis()
                                         dragId = id
                                         dragDy = 0f
                                         pointerY = (tops[id] ?: 0f) + start.y
@@ -922,8 +828,8 @@ private fun SubsCard(
                                         pointerY = (tops[id] ?: 0f) + change.position.y
                                     }
                                 },
-                                onDragEnd = { if (dragId == id) drop() },
-                                onDragCancel = { if (dragId == id) drop() },
+                                onDragEnd = { dragStamp[0] = SystemClock.uptimeMillis(); if (dragId == id) drop() },
+                                onDragCancel = { dragStamp[0] = SystemClock.uptimeMillis(); if (dragId == id) drop() },
                             )
                         }
                         .zIndex(if (lifted) 1f else 0f)
@@ -948,7 +854,11 @@ private fun SubsCard(
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null
-                            ) { shut[sub.id] = !closed }
+                            ) {
+                                // долгое нажатие под перетаскивание и его отпускание — не нажатие на подписку
+                                val justDragged = SystemClock.uptimeMillis() - dragStamp[0] < 500
+                                if (dragId == null && !justDragged) Repo.toggleOpen(sub.id)
+                            }
                             .padding(start = 10.dp, end = 10.dp, top = 6.dp, bottom = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -962,7 +872,8 @@ private fun SubsCard(
                             val n = res.getQuantityString(R.plurals.servers, shownCount, shownCount)
                             Text(
                                 if (sub.info.isBlank()) n else "$n · ${sub.info}",
-                                color = p.text2, fontSize = 12.sp, lineHeight = 16.sp
+                                color = p.text2, fontSize = 12.sp, lineHeight = 16.sp,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis
                             )
                         }
                         Box(Modifier.graphicsLayer { rotationZ = rot.value }) { PolyIcon(CHEVRON, p.text2, 22.dp) }
@@ -972,9 +883,13 @@ private fun SubsCard(
                             // серверы без ответа уходят и возвращаются плавно, а не рывком
                             sub.servers.forEach { s ->
                                 key(s.id) {
+                                    // лямбда одна на сервер: пока приходят пачки пингов соседей,
+                                    // эта строка пропускает рекомпозицию целиком
+                                    val pick = remember(s.id) { { onPick(s.id) } }
                                     ServerSlot(
-                                        s, s.id == current?.id, s.id == best?.id, keepId
-                                    ) { onPick(s.id) }
+                                        s, s.id == current?.id, s.id == best?.id,
+                                        pings[s.id] != -1 || s.id == keepId, pick
+                                    )
                                 }
                             }
                             Spacer(Modifier.height(4.dp))
@@ -1056,22 +971,16 @@ private fun Avatar(sub: Sub, onClick: () -> Unit) {
 
 /** Строка сервера, которая плавно сворачивается, когда сервер не отвечает, и так же плавно возвращается. */
 @Composable
-private fun ServerSlot(s: Server, selected: Boolean, best: Boolean, keepId: String?, onClick: () -> Unit) {
-    // строка подписана только на свой пинг: перерисуется при смене её значения, а не всей карты
-    val ping by Repo.pingOf(s.id).collectAsState()
+private fun ServerSlot(s: Server, selected: Boolean, best: Boolean, keepVisible: Boolean, onClick: () -> Unit) {
+    // пинг из собственного потока сервера: строка пересобирается, только когда изменилось её число,
+    // а не все 100 строк дважды в секунду — прокрутка перестаёт лагать
+    val ping by Repo.pingFlow(s.id).collectAsState()
     // пока строка уходит, оставляем последний рабочий пинг, а не «—»
-    val last = remember { arrayOf<Int?>(null) }
-    if (ping != -1 && ping != -2) last[0] = ping
-    Collapsible(expanded = ping != -1 || s.id == keepId) {
-        ServerRow(s, selected, best, if (ping == -1) last[0] else ping.takeIf { it != -2 }, onClick)
+    val last = remember { arrayOf(ping) }
+    if (ping != null && ping != -1) last[0] = ping
+    Collapsible(expanded = keepVisible) {
+        ServerRow(s, selected, best, if (ping == -1) last[0] else ping, onClick)
     }
-}
-
-/** Подписка только на пинг конкретного сервера (для счётчиков в заголовках подписок). */
-@Composable
-private fun cellPing(id: String): Int {
-    val v by Repo.pingOf(id).collectAsState()
-    return v
 }
 
 @Composable
@@ -1102,16 +1011,20 @@ private fun ServerRow(s: Server, selected: Boolean, best: Boolean, ping: Int?, o
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
-        Text(
-            when {
-                ping == null -> "…"
-                ping < 0 -> "—"
-                else -> "$ping мс"
-            },
-            color = if (best && (ping ?: -1) > 0) p.primary else p.text2,
-            fontSize = 12.sp, fontWeight = FontWeight.Medium,
-            modifier = Modifier.padding(start = 8.dp)
-        )
+        val pingColor = if (best && (ping ?: -1) > 0) p.primary else p.text2
+        if (ping != null && ping > 0) {
+            Row(Modifier.padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                RollingNumber(ping, pingColor, 12.sp, FontWeight.Medium)
+                Text(" мс", color = pingColor, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+            }
+        } else {
+            Text(
+                if (ping == null) "…" else "—",
+                color = pingColor,
+                fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(start = 8.dp)
+            )
+        }
         Box(Modifier.size(22.dp), contentAlignment = Alignment.Center) {
             if (selected) PolyIcon(CHECK, p.primary, 20.dp)
         }
@@ -1141,5 +1054,109 @@ private fun PolyIcon(points: List<Pair<Float, Float>>, color: Color, size: Dp) {
         }
         path.close()
         drawPath(path, color)
+    }
+}
+
+
+// ── цифры, которые «перекатываются», как в Telegram ─────────────────────
+
+/**
+ * Число, у которого меняются только те цифры, что изменились: старая улетает вверх, новая выезжает снизу,
+ * когда число растёт; когда уменьшается — наоборот (старая вниз, новая сверху).
+ * Разряды считаем справа, поэтому «99 → 100» плавно добавляет сотни слева.
+ */
+@Composable
+private fun RollingNumber(value: Int, color: Color, fontSize: TextUnit, weight: FontWeight) {
+    val text = value.toString()
+    val last = remember { intArrayOf(value) }
+    // направление считаем тут, в момент смены числа; 0 (число то же) цифры не трогает
+    val dir = when {
+        value > last[0] -> 1
+        value < last[0] -> -1
+        else -> 0
+    }
+    SideEffect { last[0] = value }
+    val initial = remember { text.length }
+    val maxLen = remember { intArrayOf(text.length) }
+    if (text.length > maxLen[0]) maxLen[0] = text.length
+    val slots = maxLen[0]
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        for (j in slots - 1 downTo 0) {
+            key(j) {
+                RollingChar(text.getOrNull(text.length - 1 - j), dir, j >= initial, color, fontSize, weight)
+            }
+        }
+    }
+}
+
+@Composable
+private fun RollingChar(ch: Char?, dir: Int, enter: Boolean, color: Color, fontSize: TextUnit, weight: FontWeight) {
+    val style = TextStyle(color = color, fontSize = fontSize, fontWeight = weight, fontFeatureSettings = "tnum")
+    // последняя цифра в слоте: когда разряд исчезает, она ещё тает, а не пропадает рывком
+    var shown by remember { mutableStateOf(ch ?: '0') }
+    if (ch != null) shown = ch
+    val start = (ch ?: '0') - '0'
+    // позиция барабана в «развёрнутых» цифрах (7 → 8 → 9 → 10 → 11): так цифры идут по одной, как в одометре
+    val pos = remember { Animatable(start.toFloat()) }
+    var lo by remember { mutableIntStateOf(start) }
+    var hi by remember { mutableIntStateOf(start) }
+    // ширина и прозрачность разряда: новый разряд проявляется, лишний тает
+    val vis = remember { Animatable(if (ch == null || enter) 0f else 1f) }
+
+    LaunchedEffect(ch == null) {
+        vis.animateTo(if (ch == null) 0f else 1f, tween(220, easing = FastOutSlowInEasing))
+    }
+    LaunchedEffect(ch) {
+        if (ch == null) return@LaunchedEffect
+        val d = ch - '0'
+        val base = pos.value.roundToInt()
+        val curDigit = ((base % 10) + 10) % 10
+        val delta = when {
+            d == curDigit -> 0
+            dir >= 0 -> (d - curDigit + 10) % 10          // число растёт — крутим вверх через соседние цифры
+            else -> -((curDigit - d + 10) % 10)           // число падает — вниз
+        }
+        val target = base + delta
+        lo = minOf(kotlin.math.floor(pos.value).toInt(), target)
+        hi = maxOf(kotlin.math.ceil(pos.value).toInt(), target)
+        pos.animateTo(
+            target.toFloat(),
+            tween((200 + 60 * abs(delta)).coerceAtMost(480), easing = FastOutSlowInEasing)
+        )
+        // анимация дошла до конца — сворачиваем барабан обратно к одной цифре
+        val norm = ((target % 10) + 10) % 10
+        pos.snapTo(norm.toFloat())
+        lo = norm
+        hi = norm
+    }
+
+    Box(
+        Modifier
+            .layout { m, c ->
+                val pl = m.measure(c)
+                val w = (pl.width * vis.value).roundToInt()
+                layout(w, pl.height) { pl.placeRelative(0, 0) }
+            }
+            .graphicsLayer { alpha = vis.value },
+        contentAlignment = Alignment.Center
+    ) {
+        // невидимая «0» задаёт размер слота
+        Text("0", style = style.copy(color = Color.Transparent), maxLines = 1)
+        if (ch == null) {
+            Text(shown.toString(), style = style, maxLines = 1)
+        } else {
+            for (k in lo..hi) {
+                val digit = (((k % 10) + 10) % 10).toString()
+                Text(
+                    digit, style = style, maxLines = 1,
+                    modifier = Modifier.graphicsLayer {
+                        val off = k - pos.value
+                        translationY = off * size.height
+                        // соседние цифры плавно гаснут, ничего не обрезается
+                        alpha = (1f - abs(off)).coerceIn(0f, 1f)
+                    }
+                )
+            }
+        }
     }
 }

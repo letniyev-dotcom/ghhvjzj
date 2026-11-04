@@ -39,32 +39,18 @@ object Repo {
     val subs = MutableStateFlow<List<Sub>>(emptyList())
     val smart = MutableStateFlow(true)
 
-    /** Тема: -1 — как в системе, 0 — светлая, 1 — тёмная, 2 — ночная. */
+    /** Тема: -1 — как в системе, 0 — светлая, 1 — тёмная. */
     val themeMode = MutableStateFlow(-1)
-
-    /** Свой акцентный цвет (ARGB); 0 — по умолчанию у темы. */
-    val accent = MutableStateFlow(0)
-
-    /** Вид кнопки включения: 0 — стекло, 1 — плоская, 2 — кольцо. */
-    val btnStyle = MutableStateFlow(0)
 
     /** Приложения-исключения: их трафик идёт мимо VPN (применяется при следующем подключении). */
     val excluded = MutableStateFlow<Set<String>>(emptySet())
+
+    /** Развёрнутые подписки (по id); всё остальное свёрнуто. Хранится на диске. */
+    val opened = MutableStateFlow<Set<String>>(emptySet())
     val selected = MutableStateFlow<String?>(null)
 
     /** пинг в мс по id сервера; -1 — недоступен */
     val pings = MutableStateFlow<Map<String, Int>>(emptyMap())
-
-    /** Персональный канал пинга сервера: строка перерисуется, только когда изменилось её значение. */
-    private val pingCells = ConcurrentHashMap<String, MutableStateFlow<Int>>()
-
-    /** Подписка на пинг одного сервера (для строк списка). */
-    fun pingOf(id: String): StateFlow<Int> =
-        pingCells.getOrPut(id) { MutableStateFlow(pings.value[id] ?: -2) } // -2 — ещё не меряли
-
-    private fun pushCell(id: String, value: Int) {
-        pingCells.getOrPut(id) { MutableStateFlow(value) }.let { if (it.value != value) it.value = value }
-    }
     val vpn = MutableStateFlow(VpnStatus.OFF)
 
     /** реальная задержка через туннель, мс (пока VPN включён и приложение открыто); -1 — нет данных */
@@ -101,9 +87,8 @@ object Repo {
         subs.value = SubJson.fromJson(s.subsJson)
         smart.value = s.smart
         themeMode.value = s.theme
-        accent.value = s.accent
-        btnStyle.value = s.btn
         excluded.value = s.excluded
+        opened.value = s.opened
         selected.value = s.selected
     }
 
@@ -132,6 +117,13 @@ object Repo {
         return allServers().firstOrNull { it.id == id } ?: best()
     }
 
+    fun toggleOpen(id: String) {
+        val n = opened.value.toMutableSet()
+        if (!n.add(id)) n.remove(id)
+        opened.value = n
+        store?.opened = n
+    }
+
     fun toggleExcluded(pkg: String) {
         val n = excluded.value.toMutableSet()
         if (!n.add(pkg)) n.remove(pkg)
@@ -143,16 +135,6 @@ object Repo {
     fun setThemeDark(v: Boolean) {
         themeMode.value = if (v) 1 else 0
         store?.theme = if (v) 1 else 0
-    }
-
-    /** Применить экран «Оформление»: тема, акцент и вид кнопки сразу и в хранилище. */
-    fun setLook(mode: Int, accentArgb: Int, btn: Int) {
-        themeMode.value = mode
-        accent.value = accentArgb
-        btnStyle.value = btn
-        store?.theme = mode
-        store?.accent = accentArgb
-        store?.btn = btn
     }
 
     fun setSmart(v: Boolean) {
@@ -202,6 +184,11 @@ object Repo {
     // Поэтому замеры копим и публикуем пачкой раз в ~0,5 с, а на время перетаскивания — держим.
 
     private val latestPing = ConcurrentHashMap<String, Int>()
+
+    // отдельный поток на каждый сервер: строка списка пересобирается только при смене её пинга,
+    // а не все строки при каждом пакете замеров (со 100 серверами прокрутка лагала)
+    private val pingFlows = ConcurrentHashMap<String, MutableStateFlow<Int?>>()
+    fun pingFlow(id: String): StateFlow<Int?> = pingFlows.getOrPut(id) { MutableStateFlow(pings.value[id]) }
     private val pendingPings = HashMap<String, Int>()
     private val pingLock = Any()
     private var flushJob: Job? = null
@@ -210,15 +197,7 @@ object Repo {
     @Volatile
     var holdPings = false
 
-    /** true, пока основной список листают: пинги не публикуем, чтобы прокрутка шла без рывков. */
-    @Volatile
-    var holdPingsScroll = false
-
-    private fun pingsHeld() = holdPings || holdPingsScroll
-
     private fun publishPing(id: String, value: Int) {
-        // на время прокрутки экран не трогаем: замеры копятся и выйдут одной пачкой на отпускании
-        if (!pingsHeld()) pushCell(id, value)
         synchronized(pingLock) {
             pendingPings[id] = value
             if (flushJob?.isActive != true) {
@@ -232,7 +211,7 @@ object Repo {
 
     /** Выдаёт накопленные замеры в pings одним обновлением. Во время перетаскивания ничего не делает. */
     fun flushPings() {
-        if (pingsHeld()) {
+        if (holdPings) {
             // повторим позже, когда отпустят
             synchronized(pingLock) {
                 if (pendingPings.isNotEmpty() && flushJob?.isActive != true) {
@@ -249,13 +228,11 @@ object Repo {
             pendingPings.clear()
             c
         }
-        if (batch.isNotEmpty()) {
-            batch.forEach { (id, v) -> pushCell(id, v) }
-            pings.update { prev ->
-                val changed = batch.filter { e -> prev[e.key] != e.value }
-                if (changed.isEmpty()) prev else prev + changed
-            }
-        }
+        // неизменившиеся пропускаем: без лишних копий карты и рекомпозиций всего экрана
+        val changed = batch.filter { (id, v) -> pings.value[id] != v }
+        if (changed.isEmpty()) return
+        pings.value = pings.value + changed
+        changed.forEach { (id, v) -> pingFlows[id]?.value = v }
     }
 
     /** Один замер сервера с записью в pings. Одиночный сбой не сбрасывает показание: «—» только после двух подряд. */

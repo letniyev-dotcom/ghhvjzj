@@ -16,25 +16,20 @@ class Store(context: Context) {
         get() = sp.getBoolean("smart", true)
         set(v) = sp.edit().putBoolean("smart", v).apply()
 
-    /** Тема: -1 — как в системе, 0 — светлая, 1 — тёмная, 2 — ночная (чёрная). */
+    /** Тема: -1 — как в системе, 0 — светлая, 1 — тёмная. */
     var theme: Int
         get() = sp.getInt("theme", -1)
         set(v) = sp.edit().putInt("theme", v).apply()
-
-    /** Свой акцентный цвет (ARGB); 0 — цвет по умолчанию у выбранной темы. */
-    var accent: Int
-        get() = sp.getInt("accent", 0)
-        set(v) = sp.edit().putInt("accent", v).apply()
-
-    /** Вид кнопки включения: 0 — стекло, 1 — плоская, 2 — кольцо. */
-    var btn: Int
-        get() = sp.getInt("btn", 0)
-        set(v) = sp.edit().putInt("btn", v).apply()
 
     /** Пакеты приложений, которые ходят мимо VPN. */
     var excluded: Set<String>
         get() = sp.getStringSet("excluded", emptySet())?.toSet() ?: emptySet()
         set(v) = sp.edit().putStringSet("excluded", HashSet(v)).apply()
+
+    /** Развёрнутые подписки в списке. По умолчанию все свёрнуты. */
+    var opened: Set<String>
+        get() = sp.getStringSet("opened", emptySet())?.toSet() ?: emptySet()
+        set(v) = sp.edit().putStringSet("opened", HashSet(v)).apply()
 
     var selected: String?
         get() = sp.getString("selected", null)
