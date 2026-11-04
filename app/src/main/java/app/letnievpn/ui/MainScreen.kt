@@ -16,6 +16,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.text.TextStyle
@@ -367,26 +368,42 @@ private fun Content(
                     val alpha = if (r.toDark) a else 1f - a
                     Color.Black.copy(alpha = alpha) to (from + (1f - from) * u)
                 }
-                drawIntoCanvas { c ->
-                    val layer = c.saveLayer(null, Paint())
-                    c.drawImageRect(
-                        r.shot,
-                        dstOffset = IntOffset.Zero,
-                        dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()),
-                        paint = Paint()
+                // Низкоуровневый Canvas через нативный android.graphics.Canvas:
+                // в новых версиях Compose старый интерфейс androidx.compose.ui.graphics.Canvas
+                // (drawIntoCanvas/saveLayer/drawImageRect) удалён, а этот вариант стабилен.
+                val android = drawContext.canvas.nativeCanvas
+                val layer = android.saveLayer(0f, 0f, size.width, size.height, null)
+                android.drawBitmap(
+                    r.shot.asAndroidBitmap(),
+                    0f, 0f,
+                    android.graphics.Paint().apply {
+                        isAntiAlias = true
+                        isFilterBitmap = true
+                    }
+                )
+                val gradientPaint = android.graphics.Paint().apply {
+                    isAntiAlias = true
+                    shader = android.graphics.RadialGradient(
+                        r.center.x,
+                        r.center.y,
+                        radius.coerceAtLeast(1f),
+                        IntArray(33) { i ->
+                            val u = i / 32f
+                            val a = u * u * u * (u * (u * 6 - 15) + 10)
+                            val alpha = if (r.toDark) a else 1f - a
+                            android.graphics.Color.argb(
+                                (alpha * 255).roundToInt().coerceIn(0, 255), 0, 0, 0
+                            )
+                        },
+                        FloatArray(33) { i -> from + (1f - from) * (i / 32f) },
+                        android.graphics.Shader.TileMode.CLAMP
                     )
-                    c.drawRect(
-                        brush = Brush.radialGradient(
-                            stops.toTypedArray(),
-                            center = r.center,
-                            radius = radius.coerceAtLeast(1f)
-                        ),
-                        topLeft = Offset.Zero,
-                        size = size,
-                        blendMode = BlendMode.DstIn
+                    xfermode = android.graphics.PorterDuffXfermode(
+                        android.graphics.PorterDuff.Mode.DST_IN
                     )
-                    c.restoreToCount(layer)
                 }
+                android.drawRect(0f, 0f, size.width, size.height, gradientPaint)
+                android.restoreToCount(layer)
             }
         }
     }
