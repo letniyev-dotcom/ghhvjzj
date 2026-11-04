@@ -252,7 +252,7 @@ object Repo {
         if (batch.isNotEmpty()) {
             batch.forEach { (id, v) -> pushCell(id, v) }
             pings.update { prev ->
-                val changed = batch.filterValues { prev[it.key] != it.value }
+                val changed = batch.filter { e -> prev[e.key] != e.value }
                 if (changed.isEmpty()) prev else prev + changed
             }
         }

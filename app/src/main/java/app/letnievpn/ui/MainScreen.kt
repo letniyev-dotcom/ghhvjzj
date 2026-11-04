@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.statusBarsIgnoringVisibility
 import androidx.compose.foundation.layout.navigationBarsIgnoringVisibility
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.runtime.mutableStateListOf
@@ -297,6 +298,7 @@ private fun LookHost(onPower: () -> Unit, onReconnect: () -> Unit, onPickAvatar:
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun Content(
     onPower: () -> Unit,
